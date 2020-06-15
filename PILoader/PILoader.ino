@@ -32,6 +32,7 @@ __attribute__ ((always_inline)) inline static
 uint16_t swap565( uint8_t r, uint8_t g, uint8_t b) {
   return ((b >> 3) << 8) | ((g >> 2) << 13) | ((g >> 5) | ((r >> 3) << 3));
 }
+}
 
 #define PI_DIRECTORY "/pi"
 
@@ -137,7 +138,7 @@ bool header_read(void)
 
   Serial.printf("\n Pic_size  : %4u x %4u\n", x_wid, y_wid);
 
-  if (( gbuffer = (char*)ps_malloc( x_wid * (y_wid + 2) * sizeof(char))) == NULL ) {
+  if (( gbuffer = (char*)malloc( x_wid * 8 * sizeof(char))) == NULL ) {
     error("Sorry! no enough memory");
     return false;
   }
@@ -147,6 +148,7 @@ bool header_read(void)
     palette[i][1] = bit_load(8);
     palette[i][2] = bit_load(8);
   }
+  return true;
 }
 
 /*-------------------------------------------------------------------------*/
@@ -165,12 +167,22 @@ void expand()
   int		w, a, b, c, d;
   char 	*pp, *p;
 
+
+  uint16_t linebuf[320];
+  int height = y_wid / 2;
+  if (height > 240) {
+    height = 240;
+  }
+  int y = 0;
+
+
   a = read_color( 0);
   b = read_color( a);
   pp = gbuffer;
+  size_t pindex = 0;
   for ( l = 0; l < x_wid; l++ ) {	/*バッファの頭２ライン分を始めの２ドット*/
-    *pp++ = a;					/*と同じ色で埋めます					*/
-    *pp++ = b;
+    pp[pindex++] = a;					/*と同じ色で埋めます					*/
+    pp[pindex++] = b;
   }
   w = -1;
   for (;;) {
@@ -180,9 +192,9 @@ void expand()
     if ( w == b ) {
       do {
         w = -1;
-        a = pp[-1];
-        a = *pp++ = read_color( a);
-        *pp++ = read_color( a);
+        a = pp[pindex-1];
+        a = pp[pindex++] = read_color( a);
+        pp[pindex++] = read_color( a);
         /* ０を余分に出しているので終了チェックは無くても大丈夫*/
       } while ( bit_load( 1));
     } else {
@@ -190,45 +202,67 @@ void expand()
       l = read_len();
       switch ( b) {
         case 0:
-          a = pp[-1];
-          b = pp[-2];
+          a = pp[pindex-1];
+          b = pp[pindex-2];
 
           if ( pp[-1] == pp[-2]) {
             while ( --l >= 0) {
-              *pp++ = b;
-              *pp++ = a;
+              pp[pindex++] = b;
+              pp[pindex++] = a;
             }
           } else {
-            d = pp[-4];
-            c = pp[-3];
+            d = pp[pindex-4];
+            c = pp[pindex-3];
             while ( --l >= 0) {
-              *pp++ = d;
-              *pp++ = c;
+              pp[pindex++] = d;
+              pp[pindex++] = c;
               if ( --l < 0 )break;
-              *pp++ = b;
-              *pp++ = a;
+              pp[pindex++] = b;
+              pp[pindex++] = a;
             }
           }
           break;
         case 1:
-          nmemcpy( pp, pp - x_wid, l);
-          pp += l + l;
+          nmemcpy( &pp[pindex], &pp[pindex - x_wid], l);
+          pindex += l + l;
           break;
         case 2:
-          nmemcpy( pp, pp - (x_wid * 2), l);
-          pp += l + l;
+          nmemcpy( &pp[pindex], &pp[pindex - (x_wid * 2)], l);
+          pindex += l + l;
           break;
         case 3:
-          nmemcpy( pp, pp - (x_wid - 1), l);
-          pp += l + l;
+          nmemcpy( &pp[pindex], &pp[pindex - (x_wid - 1)], l);
+          pindex += l + l;
           break;
         case 4:
-          nmemcpy( pp, pp - (x_wid + 1), l);
-          pp += l + l;
+          nmemcpy( &pp[pindex], &pp[pindex - (x_wid + 1)], l);
+          pindex += l + l;
           break;
       }
     }
-    if ( pp >= gbuffer + (x_wid * 2) + x_wid * y_wid) return;
+    if ( pindex >= (x_wid * 2)) {
+      int offset = x_wid * 2;
+      for (int x = 0; x < 320; ++x) {
+        if ((x * 2 + 1) + (y * 2 + 1) * x_wid <= (x_wid * 2) + x_wid * y_wid) {
+          size_t c1 = gbuffer[offset +  x * 2             ];
+          size_t c2 = gbuffer[offset + (x * 2 + 1)        ];
+          size_t c3 = gbuffer[offset +  x * 2      + x_wid];
+          size_t c4 = gbuffer[offset + (x * 2 + 1) + x_wid];
+          linebuf[x] = swap565(
+                         (palette[c1][0] + palette[c2][0] + palette[c3][0] + palette[c4][0]) >> 2,
+                         (palette[c1][1] + palette[c2][1] + palette[c3][1] + palette[c4][1]) >> 2,
+                         (palette[c1][2] + palette[c2][2] + palette[c3][2] + palette[c4][2]) >> 2
+                       );
+        }
+      }
+      M5.Lcd.setAddrWindow(0, y, 320, 1);
+      M5.Lcd.pushColors((uint8_t*)linebuf, 640);
+delay(1);
+      pindex -= x_wid * 2;
+
+      if ( ++y >= height) return;
+      memmove(pp, &pp[x_wid * 2], x_wid * 6);
+    }
   }
 }
 
@@ -432,7 +466,7 @@ void piLoad(File dataFile) {
   if (PILOADER::header_read()) {      /* ヘッダー読み込み       */
     PILOADER::ginit();        /* 画面設定           */
     PILOADER::expand();       /* 展開             */
-    PILOADER::buff2scrn();      /* バッファから画面へ転送    */
+//  PILOADER::buff2scrn();      /* バッファから画面へ転送    */
     free(PILOADER::gbuffer);
   }
 }
